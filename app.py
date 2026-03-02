@@ -1,30 +1,7 @@
 """
-Portal Data Sekolah — Production Build v5.0
+Portal Data Sekolah — Production Build v5.1
 Optimized for 50+ concurrent users on Streamlit Cloud.
-
-Optimisation strategy
-─────────────────────
-1.  st.cache_resource  → server-level singleton shared by ALL users.
-    Spreadsheet is downloaded & parsed exactly ONCE per URL, regardless
-    of how many people are using the app simultaneously.
-
-2.  requests + BytesIO  → no temp-file I/O, no disk pressure.
-
-3.  ThreadPoolExecutor  → sheets parsed in parallel (up to 8 threads).
-
-4.  Category dtype      → 50–70 % RAM reduction on low-cardinality columns.
-
-5.  O(1) NPSN index     → dict-of-positions built at load time;
-    search never scans the DataFrame.
-
-6.  Server-side HTML table → no Arrow / pyarrow serialisation overhead;
-    result cached per (url_hash, group, theme) in session_state.
-
-7.  No time.sleep / st.rerun polling → critical for concurrency;
-    polling blocks the Streamlit thread and starves other users.
-
-8.  Per-user session_state holds ONLY tiny primitives (strings, dicts of
-    cached HTML strings). Heavy objects live in cache_resource.
+Fix: deduplikasi kolom duplikat saat parsing sheet.
 """
 
 from __future__ import annotations
@@ -101,7 +78,7 @@ T = _theme(DM)
 
 
 # ──────────────────────────────────────────────────────────────
-# CSS  (injected once; st.html is a no-op if content unchanged)
+# CSS
 # ──────────────────────────────────────────────────────────────
 st.html(f"""
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -220,10 +197,31 @@ def _parse_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame | None:
     for i in range(min(15, len(raw))):
         if any("npsn" in v for v in raw.iloc[i].fillna("").str.lower().tolist()):
             df = raw.iloc[i + 1:].copy()
-            df.columns = (
+
+            # Ambil nama kolom dari baris header
+            cols_raw = (
                 raw.iloc[i].fillna("").str.lower()
                 .str.strip().str.replace(r"\s+", "_", regex=True)
+                .tolist()
             )
+
+            # ── FIX: deduplikasi kolom duplikat / kosong ──────────
+            seen: dict[str, int] = {}
+            new_cols: list[str] = []
+            for c in cols_raw:
+                if c == "" or c == "_":
+                    c = "unnamed"
+                if c in seen:
+                    seen[c] += 1
+                    new_cols.append(f"{c}_{seen[c]}")
+                else:
+                    seen[c] = 0
+                    new_cols.append(c)
+            # ──────────────────────────────────────────────────────
+
+            df.columns = new_cols
+
+            # Rename kolom yang mengandung 'npsn' jadi 'npsn'
             for c in df.columns:
                 if "npsn" in c:
                     df = df.rename(columns={c: "npsn"})
@@ -239,7 +237,7 @@ def _load_spreadsheet(clean_url: str) -> tuple[pd.DataFrame, dict, dict]:
     """Download + parallel-parse. Returns (data, npsn_index, meta)."""
     resp = requests.get(
         clean_url, timeout=45,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; PortalSekolah/5.0)"}
+        headers={"User-Agent": "Mozilla/5.0 (compatible; PortalSekolah/5.1)"}
     )
     resp.raise_for_status()
 
@@ -258,7 +256,7 @@ def _load_spreadsheet(clean_url: str) -> tuple[pd.DataFrame, dict, dict]:
 
     data = pd.concat(results, ignore_index=True)
 
-    # Low-cardinality columns → category (big RAM win for string columns)
+    # Low-cardinality columns → category (RAM win)
     n = len(data)
     for col in data.select_dtypes(include="object").columns:
         try:
@@ -283,8 +281,6 @@ def _load_spreadsheet(clean_url: str) -> tuple[pd.DataFrame, dict, dict]:
 
 
 # ── Server-level shared cache ────────────────────────────────
-# max_entries=8 → at most 8 different spreadsheets in memory at once.
-# All 50+ users hitting the same URL share ONE cached object.
 @st.cache_resource(max_entries=8)
 def _server_store(url_hash: str) -> dict:
     """Mutable dict populated lazily on first access per URL."""
@@ -364,9 +360,10 @@ with st.sidebar:
     <div style="font-family:'JetBrains Mono',monospace;font-size:10px;
       color:{T['txt3']};line-height:2">
       <b style="color:{T['txt2']}">Portal Data Sekolah</b><br>
-      NPSN Lookup v5.0<br>
+      NPSN Lookup v5.1<br>
       Cache: server-shared ✅<br>
       50+ user: optimized ✅<br>
+      Fix: kolom duplikat ✅<br>
       Auto-update: klik Load
     </div>""", unsafe_allow_html=True)
 
@@ -381,7 +378,7 @@ st.markdown(f"""
     <div class="hdr-title">Portal Data Sekolah</div>
     <div class="hdr-sub">Pencarian instalasi berbasis NPSN — cepat &amp; akurat</div>
   </div>
-  <span class="hdr-badge">NPSN LOOKUP v5.0</span>
+  <span class="hdr-badge">NPSN LOOKUP v5.1</span>
 </div>""", unsafe_allow_html=True)
 
 
